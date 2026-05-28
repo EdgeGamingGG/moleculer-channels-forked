@@ -264,8 +264,16 @@ class KafkaAdapter extends BaseAdapter {
 
 			await consumer.subscribe({ topic: chan.name, fromBeginning: chan.kafka.fromBeginning });
 
+			// When `chan.kafka.autoCommit` is true, kafkajs commits offsets in the
+			// background and we skip the per-message `commitOffsets()` roundtrip in
+			// `processMessage` — trading at-least-once strictness for lower latency.
+			const autoCommit = chan.kafka.autoCommit === true;
+			chan._autoCommit = autoCommit;
+
 			await consumer.run({
-				autoCommit: false,
+				autoCommit,
+				autoCommitInterval: chan.kafka.autoCommitInterval,
+				autoCommitThreshold: chan.kafka.autoCommitThreshold,
 				partitionsConsumedConcurrently: chan.kafka.partitionsConsumedConcurrently,
 				eachMessage: payload => this.processMessage(chan, consumer, payload)
 			});
@@ -289,6 +297,20 @@ class KafkaAdapter extends BaseAdapter {
 	async commitOffset(consumer, topic, partition, offset) {
 		this.logger.debug("Committing new offset.", { topic, partition, offset });
 		await consumer.commitOffsets([{ topic, partition, offset }]);
+	}
+
+	/**
+	 * Commit offset unless the channel is configured to let kafkajs auto-commit.
+	 *
+	 * @param {Channel} chan
+	 * @param {KafkaConsumer} consumer
+	 * @param {String} topic
+	 * @param {Number} partition
+	 * @param {String} offset
+	 */
+	async maybeCommitOffset(chan, consumer, topic, partition, offset) {
+		if (chan._autoCommit) return;
+		await this.commitOffset(consumer, topic, partition, offset);
 	}
 
 	/**
@@ -324,7 +346,7 @@ class KafkaAdapter extends BaseAdapter {
 					`The message is addressed to other group '${group}'. Current group: '${chan.group}'. Skipping...`
 				);
 				// Acknowledge
-				await this.commitOffset(consumer, topic, partition, newOffset);
+				await this.maybeCommitOffset(chan, consumer, topic, partition, newOffset);
 				return;
 			}
 		}
@@ -343,7 +365,7 @@ class KafkaAdapter extends BaseAdapter {
 				offset: newOffset
 			});
 			// Acknowledge
-			await this.commitOffset(consumer, topic, partition, newOffset);
+			await this.maybeCommitOffset(chan, consumer, topic, partition, newOffset);
 
 			this.removeChannelActiveMessages(chan.id, [id]);
 		} catch (err) {
@@ -363,7 +385,7 @@ class KafkaAdapter extends BaseAdapter {
 					// No retries, drop message
 					this.logger.error(`No retries, drop message...`);
 				}
-				await this.commitOffset(consumer, topic, partition, newOffset);
+				await this.maybeCommitOffset(chan, consumer, topic, partition, newOffset);
 				return;
 			}
 
@@ -402,7 +424,7 @@ class KafkaAdapter extends BaseAdapter {
 
 				this.metricsIncrement(C.METRIC_CHANNELS_MESSAGES_RETRIES_TOTAL, chan);
 			}
-			await this.commitOffset(consumer, topic, partition, newOffset);
+			await this.maybeCommitOffset(chan, consumer, topic, partition, newOffset);
 		}
 	}
 
