@@ -3,6 +3,7 @@
 const { ServiceBroker } = require("moleculer");
 const ChannelMiddleware = require("./../../").Middleware;
 const KafkaAdapter = require("../../src/adapters/kafka");
+const C = require("../../src/constants");
 
 describe("Test service 'channelHandlerTrigger' method", () => {
 	const serviceSchema = {
@@ -248,6 +249,93 @@ describe("Test KafkaAdapter autoCommit option", () => {
 			await adapter.processMessage(chan, consumer, payload);
 
 			expect(chan.handler).toHaveBeenCalledTimes(1);
+			expect(consumer.commitOffsets).not.toHaveBeenCalled();
+		});
+
+		// The remaining branches of processMessage (group-skip, drop, retry) each
+		// also acknowledge via maybeCommitOffset. These guard against a regression
+		// where one branch reverts to calling commitOffset() directly — which would
+		// commit even when the channel opted into auto-commit. Asserting "no commit
+		// when auto-commit is on" pins the routing for each branch.
+
+		it("should route the group-skip path through the gate (no commit when auto-commit on)", async () => {
+			const { adapter, consumer } = createAdapter();
+			adapter.serializer = { deserialize: jest.fn(() => ({})) };
+			const chan = createChannel({ _autoCommit: true });
+			adapter.initChannelActiveMessages(chan.id);
+
+			// Message addressed to a different group than the channel's → skipped.
+			const skipPayload = {
+				topic: "topic.a",
+				partition: 0,
+				message: {
+					offset: "10",
+					headers: { [C.HEADER_GROUP]: Buffer.from("other-group") },
+					value: Buffer.from("{}")
+				}
+			};
+
+			await adapter.processMessage(chan, consumer, skipPayload);
+
+			expect(chan.handler).not.toHaveBeenCalled();
+			expect(consumer.commitOffsets).not.toHaveBeenCalled();
+		});
+
+		it("should commit offset+1 on the drop path (no retries) when auto-commit is off", async () => {
+			const { adapter, consumer } = createAdapter();
+			adapter.serializer = { deserialize: jest.fn(() => ({})) };
+			adapter.metricsIncrement = jest.fn();
+			const chan = createChannel({
+				_autoCommit: false,
+				maxRetries: 0,
+				handler: jest.fn(async () => {
+					throw new Error("boom");
+				})
+			});
+			adapter.initChannelActiveMessages(chan.id);
+
+			await adapter.processMessage(chan, consumer, payload);
+
+			expect(consumer.commitOffsets).toHaveBeenCalledWith([
+				{ topic: "topic.a", partition: 0, offset: 11 }
+			]);
+		});
+
+		it("should route the drop path (no retries) through the gate (no commit when auto-commit on)", async () => {
+			const { adapter, consumer } = createAdapter();
+			adapter.serializer = { deserialize: jest.fn(() => ({})) };
+			adapter.metricsIncrement = jest.fn();
+			const chan = createChannel({
+				_autoCommit: true,
+				maxRetries: 0,
+				handler: jest.fn(async () => {
+					throw new Error("boom");
+				})
+			});
+			adapter.initChannelActiveMessages(chan.id);
+
+			await adapter.processMessage(chan, consumer, payload);
+
+			expect(consumer.commitOffsets).not.toHaveBeenCalled();
+		});
+
+		it("should route the retry/redeliver path through the gate (no commit when auto-commit on)", async () => {
+			const { adapter, consumer } = createAdapter();
+			adapter.serializer = { deserialize: jest.fn(() => ({})) };
+			adapter.metricsIncrement = jest.fn();
+			adapter.publish = jest.fn(async () => {}); // redelivery republishes the message
+			const chan = createChannel({
+				_autoCommit: true,
+				maxRetries: 2,
+				handler: jest.fn(async () => {
+					throw new Error("boom");
+				})
+			});
+			adapter.initChannelActiveMessages(chan.id);
+
+			await adapter.processMessage(chan, consumer, payload);
+
+			expect(adapter.publish).toHaveBeenCalledTimes(1); // confirms we took the retry branch
 			expect(consumer.commitOffsets).not.toHaveBeenCalled();
 		});
 	});

@@ -999,8 +999,55 @@ describe("Integration tests", () => {
 					// against identical data with no committed-offset carryover.
 					const producer = createBroker(adapter, { nodeID: "autocommit-prod" });
 
+					// Read the committed offset for a consumer group straight from the broker.
+					// This is what actually distinguishes the two modes — delivery alone
+					// does not prove offsets were committed.
+					async function committedOffset(group) {
+						const kafka = new Kafka({
+							clientId: "autocommit-offset-check",
+							brokers: adapter.options.kafka.brokers
+						});
+						const admin = kafka.admin();
+						await admin.connect();
+						try {
+							// The adapter composes the Kafka consumer group id as
+							// `${chan.group}-${chan.name}` (see kafka.js subscribe()).
+							const res = await admin.fetchOffsets({
+								groupId: `${group}-${TOPIC}`,
+								topics: [TOPIC]
+							});
+							const partition = res[0].partitions.find(p => p.partition === 0);
+							return Number(partition.offset);
+						} finally {
+							await admin.disconnect();
+						}
+					}
+
 					beforeAll(async () => {
-						await createKafkaTopics(adapter, [{ topic: TOPIC, numPartitions: 1 }]);
+						// Delete + recreate the topic so each run starts from an exactly-N
+						// backlog with no stale committed offsets from a previous run (the
+						// consumer group ids are fixed). Keeps the test isolated even against
+						// a broker that persists across runs.
+						const kafka = new Kafka({
+							clientId: "autocommit-setup",
+							brokers: adapter.options.kafka.brokers
+						});
+						const admin = kafka.admin();
+						await admin.connect();
+						if ((await admin.listTopics()).includes(TOPIC)) {
+							await admin.deleteTopics({ topics: [TOPIC], timeout: 10000 });
+							// Deletion is async on the broker — wait until it is really gone.
+							for (let i = 0; i < 30; i++) {
+								if (!(await admin.listTopics()).includes(TOPIC)) break;
+								await producer.Promise.delay(1000);
+							}
+						}
+						await admin.createTopics({
+							waitForLeaders: true,
+							topics: [{ topic: TOPIC, numPartitions: 1 }]
+						});
+						await admin.disconnect();
+
 						await producer.start().delay(DELAY_AFTER_BROKER_START);
 						for (let i = 0; i < N; i++) {
 							await producer.sendToChannel(TOPIC, { seq: i });
@@ -1039,20 +1086,29 @@ describe("Integration tests", () => {
 						});
 						try {
 							await Promise.race([done, timeout]);
+							// Let kafkajs background auto-commit flush before we disconnect, so the
+							// committed-offset assertion is deterministic (interval is 500ms).
+							if (autoCommit) await broker.Promise.delay(2000);
 						} finally {
 							await broker.stop();
 						}
 						return received;
 					}
 
-					it("should consume all messages with autoCommit:false (explicit per-message commit)", async () => {
-						const received = await consumeAll(false, "autocommit-false");
+					it("should consume all messages and commit the offset with autoCommit:false (explicit per-message commit)", async () => {
+						const group = "autocommit-false";
+						const received = await consumeAll(false, group);
 						expect(received).toBe(N);
+						// Explicit per-message commit must have advanced the group offset to N.
+						expect(await committedOffset(group)).toBe(N);
 					});
 
-					it("should consume all messages with autoCommit:true (kafkajs background commit)", async () => {
-						const received = await consumeAll(true, "autocommit-true");
+					it("should consume all messages and commit the offset with autoCommit:true (kafkajs background commit)", async () => {
+						const group = "autocommit-true";
+						const received = await consumeAll(true, group);
 						expect(received).toBe(N);
+						// Background auto-commit must have advanced the group offset to N as well.
+						expect(await committedOffset(group)).toBe(N);
 					});
 				});
 			}
