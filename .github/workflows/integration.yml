@@ -78,7 +78,7 @@ jobs:
 
     - name: Start containers for Kafka adapter
       if: ${{ matrix.adapter == 'Kafka' }}
-      run: docker compose up -d zookeeper kafka
+      run: docker compose up -d kafka
       working-directory: ./test
 
     - name: Sleeping 30 secs

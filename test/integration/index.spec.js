@@ -79,10 +79,28 @@ describe("Integration tests", () => {
 			if (adapter.type == "Kafka") {
 				DELAY_AFTER_BROKER_START = 6000; // Need more to due to rebalancing
 				it("initialize Kafka topics", async () => {
+					// Pre-create every topic the suite uses. Kafka 4.x (KRaft)
+					// propagates auto-created-topic metadata more slowly than kafkajs'
+					// producer retry window, so relying on auto-creation makes the
+					// produce/subscribe tests flaky. Explicit creation avoids that.
 					await createKafkaTopics(adapter, [
 						{ topic: "test.balanced.topic", numPartitions: 3 },
 						{ topic: "test.unstable.topic", numPartitions: 2 },
-						{ topic: "test.fail.topic", numPartitions: 1 }
+						{ topic: "test.fail.topic", numPartitions: 1 },
+						{ topic: "test.simple.topic", numPartitions: 1 },
+						{ topic: "test.serializer.topic", numPartitions: 1 },
+						{ topic: "test.topic1", numPartitions: 1 },
+						{ topic: "test.topic2", numPartitions: 1 },
+						{ topic: "test.failed_messages.topic", numPartitions: 1 },
+						{ topic: "test.mif.topic", numPartitions: 1 },
+						{ topic: "test.ns.topic", numPartitions: 1 },
+						// Namespaced variants — the adapter prefixes the topic with the
+						// broker namespace (see base.js addPrefixTopic / prefix default).
+						{ topic: "A.test.ns.topic", numPartitions: 1 },
+						{ topic: "B.test.ns.topic", numPartitions: 1 },
+						{ topic: "C.test.ns.topic", numPartitions: 1 },
+						{ topic: "test.default.options.topic", numPartitions: 1 },
+						{ topic: "test.delayed.connection.topic", numPartitions: 1 }
 					]);
 				});
 			}

@@ -287,20 +287,9 @@ class KafkaAdapter extends BaseAdapter {
 	}
 
 	/**
-	 * Commit new offset to Kafka broker.
-	 *
-	 * @param {KafkaConsumer} consumer
-	 * @param {String} topic
-	 * @param {Number} partition
-	 * @param {String} offset
-	 */
-	async commitOffset(consumer, topic, partition, offset) {
-		this.logger.debug("Committing new offset.", { topic, partition, offset });
-		await consumer.commitOffsets([{ topic, partition, offset }]);
-	}
-
-	/**
-	 * Commit offset unless the channel is configured to let kafkajs auto-commit.
+	 * Acknowledge a message by committing its offset to the broker — unless the
+	 * channel opted into kafkajs background auto-commit, in which case kafkajs
+	 * owns the commit and we do nothing.
 	 *
 	 * @param {Channel} chan
 	 * @param {KafkaConsumer} consumer
@@ -310,7 +299,8 @@ class KafkaAdapter extends BaseAdapter {
 	 */
 	async maybeCommitOffset(chan, consumer, topic, partition, offset) {
 		if (chan._autoCommit) return;
-		await this.commitOffset(consumer, topic, partition, offset);
+		this.logger.debug("Committing new offset.", { topic, partition, offset });
+		await consumer.commitOffsets([{ topic, partition, offset }]);
 	}
 
 	/**
