@@ -989,73 +989,73 @@ describe("Integration tests", () => {
 				});
 			}
 
-				if (adapter.type == "Kafka") {
-					describe("Test Kafka autoCommit option", () => {
-						const TOPIC = "test.autocommit.topic";
-						const N = 100;
+			if (adapter.type == "Kafka") {
+				describe("Test Kafka autoCommit option", () => {
+					const TOPIC = "test.autocommit.topic";
+					const N = 100;
 
-						// Produce a fixed backlog once; each consumer reads it from the
-						// beginning under its own group, so the two modes are compared
-						// against identical data with no committed-offset carryover.
-						const producer = createBroker(adapter, { nodeID: "autocommit-prod" });
+					// Produce a fixed backlog once; each consumer reads it from the
+					// beginning under its own group, so the two modes are compared
+					// against identical data with no committed-offset carryover.
+					const producer = createBroker(adapter, { nodeID: "autocommit-prod" });
 
-						beforeAll(async () => {
-							await createKafkaTopics(adapter, [{ topic: TOPIC, numPartitions: 1 }]);
-							await producer.start().delay(DELAY_AFTER_BROKER_START);
-							for (let i = 0; i < N; i++) {
-								await producer.sendToChannel(TOPIC, { seq: i });
-							}
-						});
-						afterAll(() => producer.stop());
+					beforeAll(async () => {
+						await createKafkaTopics(adapter, [{ topic: TOPIC, numPartitions: 1 }]);
+						await producer.start().delay(DELAY_AFTER_BROKER_START);
+						for (let i = 0; i < N; i++) {
+							await producer.sendToChannel(TOPIC, { seq: i });
+						}
+					});
+					afterAll(() => producer.stop());
 
-						async function consumeAll(autoCommit, group) {
-							let received = 0;
-							let resolveDone;
-							const done = new Promise(r => (resolveDone = r));
+					async function consumeAll(autoCommit, group) {
+						let received = 0;
+						let resolveDone;
+						const done = new Promise(r => (resolveDone = r));
 
-							const broker = createBroker(adapter, { nodeID: `autocommit-sub-${group}` });
-							broker.createService({
-								name: "autocommit-sub",
-								channels: {
-									[TOPIC]: {
-										group,
-										kafka: {
-											fromBeginning: true,
-											autoCommit,
-											autoCommitInterval: 500,
-											autoCommitThreshold: 50
-										},
-										handler() {
-											received++;
-											if (received === N) resolveDone();
-										}
+						const broker = createBroker(adapter, { nodeID: `autocommit-sub-${group}` });
+						broker.createService({
+							name: "autocommit-sub",
+							channels: {
+								[TOPIC]: {
+									group,
+									kafka: {
+										fromBeginning: true,
+										autoCommit,
+										autoCommitInterval: 500,
+										autoCommitThreshold: 50
+									},
+									handler() {
+										received++;
+										if (received === N) resolveDone();
 									}
 								}
-							});
-
-							await broker.start().delay(DELAY_AFTER_BROKER_START);
-							const timeout = broker.Promise.delay(30000).then(() => {
-								throw new Error(`Timed out: only got ${received}/${N}`);
-							});
-							try {
-								await Promise.race([done, timeout]);
-							} finally {
-								await broker.stop();
 							}
-							return received;
+						});
+
+						await broker.start().delay(DELAY_AFTER_BROKER_START);
+						const timeout = broker.Promise.delay(30000).then(() => {
+							throw new Error(`Timed out: only got ${received}/${N}`);
+						});
+						try {
+							await Promise.race([done, timeout]);
+						} finally {
+							await broker.stop();
 						}
+						return received;
+					}
 
-						it("should consume all messages with autoCommit:false (explicit per-message commit)", async () => {
-							const received = await consumeAll(false, "autocommit-false");
-							expect(received).toBe(N);
-						});
-
-						it("should consume all messages with autoCommit:true (kafkajs background commit)", async () => {
-							const received = await consumeAll(true, "autocommit-true");
-							expect(received).toBe(N);
-						});
+					it("should consume all messages with autoCommit:false (explicit per-message commit)", async () => {
+						const received = await consumeAll(false, "autocommit-false");
+						expect(received).toBe(N);
 					});
-				}
+
+					it("should consume all messages with autoCommit:true (kafkajs background commit)", async () => {
+						const received = await consumeAll(true, "autocommit-true");
+						expect(received).toBe(N);
+					});
+				});
+			}
 		});
 	}
 });
