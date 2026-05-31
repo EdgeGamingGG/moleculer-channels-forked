@@ -1,0 +1,45 @@
+name: Release
+
+# Publishes @ludeo/channels-ludeo to the npm registry when a version tag is
+# pushed (e.g. `git tag v0.1.0 && git push --tags`). The tag must match the
+# version in package.json or the job fails before publishing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.x
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@ludeo'
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json version: $PKG_VERSION"
+          echo "git tag version:      $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match package.json version '$PKG_VERSION'. Bump package.json or retag."
+            exit 1
+          fi
+
+      - run: npm ci --legacy-peer-deps
+
+      - name: Run unit tests
+        run: npx jest test/unit
+
+      - name: Publish to npm (restricted)
+        run: npm publish --access restricted
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
