@@ -77,7 +77,10 @@ describe("Integration tests", () => {
 	for (const adapter of Adapters) {
 		describe(`Adapter: ${adapter.name || adapter.type}`, () => {
 			if (adapter.type == "Kafka") {
-				DELAY_AFTER_BROKER_START = 6000; // Need more to due to rebalancing
+				// KRaft + group.initial.rebalance.delay.ms=0 lets consumers join
+				// quickly, so we don't need the old Zookeeper-era 6s settle time.
+				// 2000ms is a stable floor with margin for slower CI runners.
+				DELAY_AFTER_BROKER_START = 2000;
 				it("initialize Kafka topics", async () => {
 					// Pre-create every topic the suite uses. Kafka 4.x (KRaft)
 					// propagates auto-created-topic metadata more slowly than kafkajs'
@@ -100,7 +103,9 @@ describe("Integration tests", () => {
 						{ topic: "B.test.ns.topic", numPartitions: 1 },
 						{ topic: "C.test.ns.topic", numPartitions: 1 },
 						{ topic: "test.default.options.topic", numPartitions: 1 },
-						{ topic: "test.delayed.connection.topic", numPartitions: 1 }
+						{ topic: "test.delayed.connection.topic", numPartitions: 1 },
+						// Dead-letter target topic used by the dead-letter tests.
+						{ topic: "DEAD_LETTER", numPartitions: 1 }
 					]);
 				});
 			}
@@ -1106,7 +1111,7 @@ describe("Integration tests", () => {
 							await Promise.race([done, timeout]);
 							// Let kafkajs background auto-commit flush before we disconnect, so the
 							// committed-offset assertion is deterministic (interval is 500ms).
-							if (autoCommit) await broker.Promise.delay(2000);
+							if (autoCommit) await broker.Promise.delay(1500);
 						} finally {
 							await broker.stop();
 						}
