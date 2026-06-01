@@ -77,12 +77,35 @@ describe("Integration tests", () => {
 	for (const adapter of Adapters) {
 		describe(`Adapter: ${adapter.name || adapter.type}`, () => {
 			if (adapter.type == "Kafka") {
-				DELAY_AFTER_BROKER_START = 6000; // Need more to due to rebalancing
+				// KRaft + group.initial.rebalance.delay.ms=0 lets consumers join
+				// quickly, so we don't need the old Zookeeper-era 6s settle time.
+				// 2000ms is a stable floor with margin for slower CI runners.
+				DELAY_AFTER_BROKER_START = 2000;
 				it("initialize Kafka topics", async () => {
+					// Pre-create every topic the suite uses. Kafka 4.x (KRaft)
+					// propagates auto-created-topic metadata more slowly than kafkajs'
+					// producer retry window, so relying on auto-creation makes the
+					// produce/subscribe tests flaky. Explicit creation avoids that.
 					await createKafkaTopics(adapter, [
 						{ topic: "test.balanced.topic", numPartitions: 3 },
 						{ topic: "test.unstable.topic", numPartitions: 2 },
-						{ topic: "test.fail.topic", numPartitions: 1 }
+						{ topic: "test.fail.topic", numPartitions: 1 },
+						{ topic: "test.simple.topic", numPartitions: 1 },
+						{ topic: "test.serializer.topic", numPartitions: 1 },
+						{ topic: "test.topic1", numPartitions: 1 },
+						{ topic: "test.topic2", numPartitions: 1 },
+						{ topic: "test.failed_messages.topic", numPartitions: 1 },
+						{ topic: "test.mif.topic", numPartitions: 1 },
+						{ topic: "test.ns.topic", numPartitions: 1 },
+						// Namespaced variants — the adapter prefixes the topic with the
+						// broker namespace (see base.js addPrefixTopic / prefix default).
+						{ topic: "A.test.ns.topic", numPartitions: 1 },
+						{ topic: "B.test.ns.topic", numPartitions: 1 },
+						{ topic: "C.test.ns.topic", numPartitions: 1 },
+						{ topic: "test.default.options.topic", numPartitions: 1 },
+						{ topic: "test.delayed.connection.topic", numPartitions: 1 },
+						// Dead-letter target topic used by the dead-letter tests.
+						{ topic: "DEAD_LETTER", numPartitions: 1 }
 					]);
 				});
 			}
@@ -985,6 +1008,130 @@ describe("Integration tests", () => {
 						expect(deadLetterHandler).toHaveBeenCalledTimes(1);
 
 						await broker.Promise.delay(500);
+					});
+				});
+			}
+
+			if (adapter.type == "Kafka") {
+				describe("Test Kafka autoCommit option", () => {
+					const TOPIC = "test.autocommit.topic";
+					const N = 100;
+
+					// Produce a fixed backlog once; each consumer reads it from the
+					// beginning under its own group, so the two modes are compared
+					// against identical data with no committed-offset carryover.
+					const producer = createBroker(adapter, { nodeID: "autocommit-prod" });
+
+					// Read the committed offset for a consumer group straight from the broker.
+					// This is what actually distinguishes the two modes — delivery alone
+					// does not prove offsets were committed.
+					async function committedOffset(group) {
+						const kafka = new Kafka({
+							clientId: "autocommit-offset-check",
+							brokers: adapter.options.kafka.brokers
+						});
+						const admin = kafka.admin();
+						await admin.connect();
+						try {
+							// The adapter composes the Kafka consumer group id as
+							// `${chan.group}-${chan.name}` (see kafka.js subscribe()).
+							const res = await admin.fetchOffsets({
+								groupId: `${group}-${TOPIC}`,
+								topics: [TOPIC]
+							});
+							const partition = res[0].partitions.find(p => p.partition === 0);
+							return Number(partition.offset);
+						} finally {
+							await admin.disconnect();
+						}
+					}
+
+					beforeAll(async () => {
+						// Delete + recreate the topic so each run starts from an exactly-N
+						// backlog with no stale committed offsets from a previous run (the
+						// consumer group ids are fixed). Keeps the test isolated even against
+						// a broker that persists across runs.
+						const kafka = new Kafka({
+							clientId: "autocommit-setup",
+							brokers: adapter.options.kafka.brokers
+						});
+						const admin = kafka.admin();
+						await admin.connect();
+						if ((await admin.listTopics()).includes(TOPIC)) {
+							await admin.deleteTopics({ topics: [TOPIC], timeout: 10000 });
+							// Deletion is async on the broker — wait until it is really gone.
+							for (let i = 0; i < 30; i++) {
+								if (!(await admin.listTopics()).includes(TOPIC)) break;
+								await producer.Promise.delay(1000);
+							}
+						}
+						await admin.createTopics({
+							waitForLeaders: true,
+							topics: [{ topic: TOPIC, numPartitions: 1 }]
+						});
+						await admin.disconnect();
+
+						await producer.start().delay(DELAY_AFTER_BROKER_START);
+						for (let i = 0; i < N; i++) {
+							await producer.sendToChannel(TOPIC, { seq: i });
+						}
+					});
+					afterAll(() => producer.stop());
+
+					async function consumeAll(autoCommit, group) {
+						let received = 0;
+						let resolveDone;
+						const done = new Promise(r => (resolveDone = r));
+
+						const broker = createBroker(adapter, { nodeID: `autocommit-sub-${group}` });
+						broker.createService({
+							name: "autocommit-sub",
+							channels: {
+								[TOPIC]: {
+									group,
+									kafka: {
+										fromBeginning: true,
+										autoCommit,
+										autoCommitInterval: 500,
+										autoCommitThreshold: 50
+									},
+									handler() {
+										received++;
+										if (received === N) resolveDone();
+									}
+								}
+							}
+						});
+
+						await broker.start().delay(DELAY_AFTER_BROKER_START);
+						const timeout = broker.Promise.delay(30000).then(() => {
+							throw new Error(`Timed out: only got ${received}/${N}`);
+						});
+						try {
+							await Promise.race([done, timeout]);
+							// Let kafkajs background auto-commit flush before we disconnect, so the
+							// committed-offset assertion is deterministic (interval is 500ms).
+							if (autoCommit) await broker.Promise.delay(1500);
+						} finally {
+							await broker.stop();
+						}
+						return received;
+					}
+
+					it("should consume all messages and commit the offset with autoCommit:false (explicit per-message commit)", async () => {
+						const group = "autocommit-false";
+						const received = await consumeAll(false, group);
+						expect(received).toBe(N);
+						// Explicit per-message commit must have advanced the group offset to N.
+						expect(await committedOffset(group)).toBe(N);
+					});
+
+					it("should consume all messages and commit the offset with autoCommit:true (kafkajs background commit)", async () => {
+						const group = "autocommit-true";
+						const received = await consumeAll(true, group);
+						expect(received).toBe(N);
+						// Background auto-commit must have advanced the group offset to N as well.
+						expect(await committedOffset(group)).toBe(N);
 					});
 				});
 			}

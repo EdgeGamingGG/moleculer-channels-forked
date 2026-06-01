@@ -1,6 +1,6 @@
 {
   "name": "@ludeo/channels-ludeo",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Reliable messages for Moleculer services",
   "main": "index.js",
   "scripts": {
@@ -18,7 +18,7 @@
     "coverall": "cat ./coverage/lcov.info | ./node_modules/coveralls/bin/coveralls.js",
     "test:up": "docker compose -f test/docker-compose.yml up -d",
     "test:down": "docker compose -f test/docker-compose.yml down -v",
-    "release": "npm publish --access public && git push --follow-tags"
+    "release": "npm publish --access restricted && git push --follow-tags"
   },
   "keywords": [
     "moleculer",
