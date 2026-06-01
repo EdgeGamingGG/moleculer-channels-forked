@@ -1,37 +1,46 @@
 name: Release
 
-# Publishes @ludeo/channels-ludeo to npm when a version tag is pushed
-# (e.g. `git tag v0.1.0 && git push --tags`). The tag must match the version
-# in package.json or the job fails before publishing.
+# Publishes @ludeo/channels-ludeo to npm. Triggered manually from the Actions
+# tab ("Run workflow") — you enter the version (e.g. 0.2.0) and the job:
+#   1. runs unit tests,
+#   2. bumps package.json (+ lockfile) to that version,
+#   3. commits the bump and tags it `vX.Y.Z`, pushing ONLY the tag,
+#   4. publishes to npm via Trusted Publishing (OIDC) — no long-lived NPM_TOKEN.
 #
-# Authentication uses npm Trusted Publishing (OIDC) — no long-lived NPM_TOKEN.
-# Prerequisites (one-time):
-#   1. The package must already exist on npm. Trusted publishers are configured
-#      per-package, so the very first version must be published manually once
-#      (`npm publish --access restricted` locally), then OIDC handles the rest.
-#   2. On npmjs.com → the package → Settings → Trusted Publisher, add:
-#        Provider:   GitHub Actions
-#        Owner:      EdgeGamingGG
-#        Repository: moleculer-channels-forked
-#        Workflow:   release.yml
-#        Environment: (leave blank)
+# Note: master is a protected branch (PR + review required), so the version-bump
+# commit is NOT pushed to master — it lives only on the tag. package.json on
+# master stays as-is; each release sets the version explicitly from the input,
+# so this drift is cosmetic and never affects what gets published.
+#
+# Trusted publishing is configured per-package on npmjs.com → the package →
+# Settings → Trusted Publisher:
+#     Provider:   GitHub Actions
+#     Owner:      EdgeGamingGG
+#     Repository: moleculer-channels-forked
+#     Workflow:   release.yml
+#     Environment: (leave blank)
 #
 # Provenance is intentionally disabled: provenance attestations are public, so
 # they can't be generated for a restricted/private package.
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (x.y.z, no leading "v")'
+        required: true
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       id-token: write # required for npm Trusted Publishing (OIDC)
-      contents: read
+      contents: write # required to push the version-bump commit and tag
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -43,14 +52,15 @@ jobs:
       - name: Upgrade npm
         run: npm install -g npm@latest
 
-      - name: Verify tag matches package.json version
+      - name: Validate version input
         run: |
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          echo "package.json version: $PKG_VERSION"
-          echo "git tag version:      $TAG_VERSION"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match package.json version '$PKG_VERSION'. Bump package.json or retag."
+          VERSION="${{ github.event.inputs.version }}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version '$VERSION' is not a valid x.y.z semver."
+            exit 1
+          fi
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag 'v$VERSION' already exists. Pick a new version."
             exit 1
           fi
 
@@ -58,6 +68,19 @@ jobs:
 
       - name: Run unit tests
         run: npx jest test/unit
+
+      - name: Bump package.json to v${{ github.event.inputs.version }}
+        run: npm version "${{ github.event.inputs.version }}" --no-git-tag-version
+
+      - name: Commit and tag release
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: release v$VERSION"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          # master is protected, so push only the tag (which carries the bump commit).
+          git push origin "v$VERSION"
 
       # OIDC supplies a short-lived token automatically — no NODE_AUTH_TOKEN.
       - name: Publish to npm (restricted, via OIDC)
